@@ -281,7 +281,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 	var valkeyClusterName string
 
-	Context("when a ValkeyCluster CR is applied", func() {
+	Context("when a ValkeyCluster CR is applied", Label("base-case"), func() {
 		It("creates a Valkey Cluster deployment", func() {
 			By("creating the CR")
 			cmd := exec.Command("kubectl", "create", "-f", "config/samples/v1alpha1_valkeycluster.yaml")

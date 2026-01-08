@@ -17,9 +17,12 @@ limitations under the License.
 package controller
 
 import (
+	"fmt"
+
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
 )
 
@@ -29,6 +32,116 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 		image = cluster.Spec.Image
 	}
 
+	containers := []corev1.Container{
+		{
+			Name:  "valkey-server",
+			Image: image,
+			Command: []string{
+				"valkey-server",
+				"/config/valkey.conf",
+			},
+			Ports: []corev1.ContainerPort{
+				{
+					Name:          "client",
+					ContainerPort: DefaultPort,
+				},
+				{
+					Name:          "cluster-bus",
+					ContainerPort: DefaultClusterBusPort,
+				},
+			},
+			LivenessProbe: &corev1.Probe{
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       5,
+				FailureThreshold:    5,
+				TimeoutSeconds:      5,
+				SuccessThreshold:    1,
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"/bin/bash",
+							"-c",
+							"/scripts/liveness-check.sh",
+						},
+					},
+				},
+			},
+			ReadinessProbe: &corev1.Probe{
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       5,
+				FailureThreshold:    5,
+				TimeoutSeconds:      2,
+				SuccessThreshold:    1,
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{
+						Command: []string{
+							"/bin/bash",
+							"-c",
+							"/scripts/readiness-check.sh",
+						},
+					},
+				},
+			},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      "scripts",
+					MountPath: "/scripts",
+				},
+				{
+					Name:      "valkey-conf",
+					MountPath: "/config",
+					ReadOnly:  true,
+				},
+			},
+		},
+	}
+	if cluster.Spec.Exporter.Enabled {
+		exporterImage := DefaultExporterImage
+		if cluster.Spec.Exporter.Image != "" {
+			exporterImage = cluster.Spec.Exporter.Image
+		}
+
+		exporterContainer := corev1.Container{
+			Name:  "metrics-exporter",
+			Image: exporterImage,
+			Args: []string{
+				fmt.Sprintf("--redis.addr=localhost:%d", DefaultPort),
+			},
+			Ports: []corev1.ContainerPort{
+				{
+					Name:          "metrics",
+					ContainerPort: DefaultExporterPort,
+					Protocol:      corev1.ProtocolTCP,
+				},
+			},
+			LivenessProbe: &corev1.Probe{
+				InitialDelaySeconds: 10,
+				PeriodSeconds:       10,
+				TimeoutSeconds:      3,
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/health",
+						Port: intstr.FromInt(DefaultExporterPort),
+					},
+				},
+			},
+			ReadinessProbe: &corev1.Probe{
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       10,
+				TimeoutSeconds:      3,
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{
+						Path: "/health",
+						Port: intstr.FromInt(DefaultExporterPort),
+					},
+				},
+			},
+			Resources: cluster.Spec.Exporter.Resources,
+		}
+
+		containers = append(containers, exporterContainer)
+
+	}
 	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: cluster.Name + "-",
@@ -45,69 +158,7 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 					Labels: labels(cluster),
 				},
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "valkey-server",
-							Image: image,
-							Command: []string{
-								"valkey-server",
-								"/config/valkey.conf",
-							},
-							Ports: []corev1.ContainerPort{
-								{
-									Name:          "client",
-									ContainerPort: DefaultPort,
-								},
-								{
-									Name:          "cluster-bus",
-									ContainerPort: DefaultClusterBusPort,
-								},
-							},
-							LivenessProbe: &corev1.Probe{
-								InitialDelaySeconds: 5,
-								PeriodSeconds:       5,
-								FailureThreshold:    5,
-								TimeoutSeconds:      5,
-								SuccessThreshold:    1,
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{
-											"/bin/bash",
-											"-c",
-											"/scripts/liveness-check.sh",
-										},
-									},
-								},
-							},
-							ReadinessProbe: &corev1.Probe{
-								InitialDelaySeconds: 5,
-								PeriodSeconds:       5,
-								FailureThreshold:    5,
-								TimeoutSeconds:      2,
-								SuccessThreshold:    1,
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{
-										Command: []string{
-											"/bin/bash",
-											"-c",
-											"/scripts/readiness-check.sh",
-										},
-									},
-								},
-							},
-							VolumeMounts: []corev1.VolumeMount{
-								{
-									Name:      "scripts",
-									MountPath: "/scripts",
-								},
-								{
-									Name:      "valkey-conf",
-									MountPath: "/config",
-									ReadOnly:  true,
-								},
-							},
-						},
-					},
+					Containers: containers,
 					Volumes: []corev1.Volume{
 						{
 							Name: "scripts",
