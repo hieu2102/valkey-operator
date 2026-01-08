@@ -596,6 +596,51 @@ spec:
 			Eventually(verifyClusterDeleted).Should(Succeed())
 		})
 	})
+
+	Context("when a ValkeyCluster CR with exporter.enabled=false is applied", Label("metric-exporter", "disabled"), func() {
+		var clusterWithoutMetricExporterName string
+		It("should have only 1 container per pod", func() {
+			By("creating a ValkeyCluster CR")
+			clusterManifest := `
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkeycluster-no-metrics
+spec:
+  shards: 1
+  replicas: 0
+  exporter:
+    enabled: false
+`
+			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-no-metrics.yaml")
+			err := os.WriteFile(manifestFile, []byte(clusterManifest), 0644)
+			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
+			defer os.Remove(manifestFile)
+
+			By("applying the CR")
+			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
+			clusterWithoutMetricExporterName = "valkeycluster-no-metrics"
+			By("waiting for cluster to become ready first")
+			verifyClusterReady := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterWithoutMetricExporterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
+			}
+			Eventually(verifyClusterReady).Should(Succeed())
+
+			By("verifying the number of container in a pod")
+			verifyContainerCount := func(g Gomega) {
+				cmd = exec.Command("kubectl", "get", "pods", "-l", "app.kubernetes.io/instance=valkeycluster-no-metrics", "-o", "jsonpath={.items[0].spec.containers[*].name}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("valkey-server"))
+			}
+			Eventually(verifyContainerCount).Should(Succeed())
+		})
+	})
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
