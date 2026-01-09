@@ -82,6 +82,7 @@ type ExporterSpec struct {
 
 	// Override resource requirements for the exporter container in each pod
 	// +optional
+	// +kubebuilder:default:={requests:{cpu:"10m", memory: "32Mi"}, limits:{cpu: "50m", memory: "64Mi"}}
 	Resources corev1.ResourceRequirements `json:"resources,omitempty"`
 
 	// Enable or disable the exporter sidecar container

@@ -411,6 +411,19 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(output).To(ContainSubstring("cluster_state:ok"))
 			}
 			Eventually(verifyClusterAccess).Should(Succeed())
+
+			By("validating Metrics Exporter pod")
+			verifyMetricsExporter := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].spec.containers[*].name}",
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal("valkey-server metrics-exporter"))
+			}
+			Eventually(verifyMetricsExporter).Should(Succeed())
+			// TODO: validate metrics exporter status (`redis_up 1`)
 		})
 	})
 
@@ -597,8 +610,8 @@ spec:
 		})
 	})
 
-	Context("when a ValkeyCluster CR with exporter.enabled=false is applied", Label("metric-exporter", "disabled"), func() {
-		var clusterWithoutMetricExporterName string
+	Context("when a ValkeyCluster CR with exporter.enabled=false is applied", Label("metrics-exporter", "disabled"), func() {
+		var clusterWithoutMetricsExporterName string
 		It("should have only 1 container per pod", func() {
 			By("creating a ValkeyCluster CR")
 			clusterManifest := `
@@ -621,10 +634,10 @@ spec:
 			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
-			clusterWithoutMetricExporterName = "valkeycluster-no-metrics"
+			clusterWithoutMetricsExporterName = "valkeycluster-no-metrics"
 			By("waiting for cluster to become ready first")
 			verifyClusterReady := func(g Gomega) {
-				cr, err := utils.GetValkeyClusterStatus(clusterWithoutMetricExporterName)
+				cr, err := utils.GetValkeyClusterStatus(clusterWithoutMetricsExporterName)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
 				g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
@@ -637,6 +650,58 @@ spec:
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
 				g.Expect(output).To(Equal("valkey-server"))
+			}
+			Eventually(verifyContainerCount).Should(Succeed())
+		})
+	})
+	Context("when a ValkeyCluster with custom exporter.resources is applied", Label("metrics-exporter", "custom-resources"), func() {
+		var clusterName string
+		It("should respect the the custom values", func() {
+			By("creating a ValkeyCluster CR")
+			clusterManifest := `
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: valkeycluster-custom-resources
+spec:
+  shards: 1
+  replicas: 0
+  exporter:
+    enabled: true
+    resources:
+      requests:
+        cpu: "20m"
+        memory: "64Mi"
+      limits:
+        cpu: "30m"
+        memory: "128Mi"
+`
+			manifestFile := filepath.Join(os.TempDir(), "valkeycluster-custom-resources.yaml")
+			err := os.WriteFile(manifestFile, []byte(clusterManifest), 0644)
+			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
+			defer os.Remove(manifestFile)
+
+			By("applying the CR")
+			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
+			clusterName = "valkeycluster-custom-resources"
+			By("waiting for cluster to become ready first")
+			verifyClusterReady := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(clusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
+			}
+			Eventually(verifyClusterReady).Should(Succeed())
+
+			By("verifying the metrics-exporter container resources")
+			verifyContainerCount := func(g Gomega) {
+				cmd = exec.Command("kubectl", "get", "pods", "-l", "app.kubernetes.io/instance=valkeycluster-custom-resources", "-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].resources}")
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(ContainSubstring(`"limits":{"cpu":"30m","memory":"128Mi"}`))
+				g.Expect(output).To(ContainSubstring(`"requests":{"cpu":"20m","memory":"64Mi"}`))
 			}
 			Eventually(verifyContainerCount).Should(Succeed())
 		})
