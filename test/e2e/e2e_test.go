@@ -32,6 +32,7 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	valkeyiov1alpha1 "valkey.io/valkey-operator/api/v1alpha1"
+	"valkey.io/valkey-operator/internal/controller"
 	"valkey.io/valkey-operator/test/utils"
 )
 
@@ -267,7 +268,7 @@ var _ = Describe("Manager", Ordered, func() {
 
 			By("getting the metrics by checking curl-metrics logs")
 			verifyMetricsAvailable := func(g Gomega) {
-				metricsOutput, err := getMetricsOutput()
+				metricsOutput, err := getMetricsOutput(namespace)
 				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
 				g.Expect(metricsOutput).NotTo(BeEmpty())
 				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
@@ -423,7 +424,64 @@ var _ = Describe("Manager", Ordered, func() {
 				g.Expect(output).To(Equal("valkey-server metrics-exporter"))
 			}
 			Eventually(verifyMetricsExporter).Should(Succeed())
-			// TODO: validate metrics exporter status (`redis_up 1`)
+
+			By("validating Metrics Exporter pod uses the default image")
+			verifyMetricsExporterImage := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].image}",
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(controller.DefaultExporterImage))
+			}
+			Eventually(verifyMetricsExporterImage).Should(Succeed())
+
+			By("validating Metrics Exporter pod have liveness probe")
+			verifyMetricsExporterLivenessProbe := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].livenessProbe}",
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+			}
+			Eventually(verifyMetricsExporterLivenessProbe).Should(Succeed())
+
+			By("validating Metrics Exporter pod have readiness probe")
+			verifyMetricsExporterReadinessProbe := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].readinessProbe}",
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).NotTo(BeEmpty())
+			}
+			Eventually(verifyMetricsExporterReadinessProbe).Should(Succeed())
+
+			By("getting the ValkeyCluster pod IP")
+			getValkeyClusterPodIpCmd := exec.Command("kubectl", "get", "pod",
+				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+				"-o", "jsonpath={.items[0].status.podIP}",
+			)
+			getValkeyClusterPodIpOutput, err := utils.Run(getValkeyClusterPodIpCmd)
+			Expect(err).NotTo(HaveOccurred())
+			createCurlMetricsPod("default", fmt.Sprintf("curl -v -k http://%s:9121/metrics", getValkeyClusterPodIpOutput))
+
+			By("getting the metrics by checking curl-metrics logs")
+			verifyMetricsAvailable := func(g Gomega) {
+				metricsOutput, err := getMetricsOutput("default")
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
+				g.Expect(metricsOutput).To(ContainSubstring("redis_up 1"))
+				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
+			}
+			Eventually(verifyMetricsAvailable, 2*time.Minute).Should(Succeed())
+
+			By("cleaning up the curl-metrics pod")
+			cmd = exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", "default", "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
 		})
 	})
 
@@ -706,6 +764,77 @@ spec:
 			Eventually(verifyContainerCount).Should(Succeed())
 		})
 	})
+	Context("when a ValkeyCluster with custom spec.exporter.image is applied", Label("metrics-exporter", "custom-image"), func() {
+		valkeyClusterName := "valkeycluster-custom-exporter-image"
+		exporterImage := "oliver006/redis_exporter:v1.80.1"
+		It("should use the provided image", func() {
+			By("creating a ValkeyCluster CR")
+			clusterManifest := fmt.Sprintf(`
+apiVersion: valkey.io/v1alpha1
+kind: ValkeyCluster
+metadata:
+  name: %s
+spec:
+  shards: 1
+  replicas: 0
+  exporter:
+    enabled: true
+    image: %s
+`, valkeyClusterName, exporterImage)
+			manifestFile := filepath.Join(os.TempDir(), fmt.Sprintf("%s.yaml", valkeyClusterName))
+			err := os.WriteFile(manifestFile, []byte(clusterManifest), 0644)
+			Expect(err).NotTo(HaveOccurred(), "Failed to write manifest file")
+			defer os.Remove(manifestFile)
+
+			By("applying the CR")
+			cmd := exec.Command("kubectl", "create", "-f", manifestFile)
+			_, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create ValkeyCluster CR")
+
+			By("waiting for cluster to become ready first")
+			verifyClusterReady := func(g Gomega) {
+				cr, err := utils.GetValkeyClusterStatus(valkeyClusterName)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cr.Status.State).To(Equal(valkeyiov1alpha1.ClusterStateReady))
+				g.Expect(cr.Status.ReadyShards).To(Equal(int32(1)))
+			}
+			Eventually(verifyClusterReady).Should(Succeed())
+
+			By("verifying the metrics-exporter pod image")
+			verifyMetricsExporterImage := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod",
+					"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+					"-o", "jsonpath={.items[0].spec.containers[?(@.name=='metrics-exporter')].image}",
+				)
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(exporterImage))
+			}
+			Eventually(verifyMetricsExporterImage).Should(Succeed())
+
+			By("getting the ValkeyCluster pod IP")
+			getValkeyClusterPodIpCmd := exec.Command("kubectl", "get", "pod",
+				"-l", fmt.Sprintf("app.kubernetes.io/instance=%s", valkeyClusterName),
+				"-o", "jsonpath={.items[0].status.podIP}",
+			)
+			getValkeyClusterPodIpOutput, err := utils.Run(getValkeyClusterPodIpCmd)
+			Expect(err).NotTo(HaveOccurred())
+			createCurlMetricsPod("default", fmt.Sprintf("curl -v -k http://%s:9121/metrics", getValkeyClusterPodIpOutput))
+
+			By("getting the metrics by checking curl-metrics logs")
+			verifyMetricsAvailable := func(g Gomega) {
+				metricsOutput, err := getMetricsOutput("default")
+				g.Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
+				g.Expect(metricsOutput).To(ContainSubstring("redis_up 1"))
+				g.Expect(metricsOutput).To(ContainSubstring("< HTTP/1.1 200 OK"))
+			}
+			Eventually(verifyMetricsAvailable, 2*time.Minute).Should(Succeed())
+
+			By("cleaning up the curl-metrics pod")
+			cmd = exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", "default", "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+		})
+	})
 })
 
 // serviceAccountToken returns a token for the specified service account in the given namespace.
@@ -749,11 +878,58 @@ func serviceAccountToken() (string, error) {
 	return out, err
 }
 
-// getMetricsOutput retrieves and returns the logs from the curl pod used to access the metrics endpoint.
-func getMetricsOutput() (string, error) {
+// getMetricsOutput retrieves and returns the logs from the curl pod in the specified namespace used to access the metrics endpoint.
+func getMetricsOutput(targetNamespace string) (string, error) {
 	By("getting the curl-metrics logs")
-	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", namespace)
+	cmd := exec.Command("kubectl", "logs", "curl-metrics", "-n", targetNamespace)
 	return utils.Run(cmd)
+}
+
+// createCurlMetricsPod create the curl-metrics pod in the targetNamespace to access metrics endpoint using the specified startCommand
+func createCurlMetricsPod(targetNamespace string, startCommand string) {
+	By("creating the curl-metrics pod to access the metrics endpoint")
+	createCurlMetricsPod := func(g Gomega) {
+		cmd := exec.Command("kubectl", "run", "curl-metrics",
+			"--restart=Never", "--image=curlimages/curl:latest",
+			"-n", targetNamespace,
+			"--overrides",
+			fmt.Sprintf(`{
+					"spec": {
+						"containers": [
+						{
+							"name": "curl",
+							"image": "curlimages/curl:latest",
+							"command": ["/bin/sh", "-c"],
+							"args": [
+							"%s"
+							],
+							"securityContext": {
+							"readOnlyRootFilesystem": true,
+							"allowPrivilegeEscalation": false,
+							"capabilities": { "drop": ["ALL"] },
+							"runAsNonRoot": true,
+							"runAsUser": 1000,
+							"seccompProfile": { "type": "RuntimeDefault" }
+							}
+						}
+						]
+					}
+					}`, startCommand))
+		_, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
+	}
+	Eventually(createCurlMetricsPod).Should(Succeed())
+
+	By("waiting for the curl-metrics pod to complete.")
+	verifyCurlUp := func(g Gomega) {
+		cmd := exec.Command("kubectl", "get", "pods", "curl-metrics",
+			"-n", targetNamespace,
+			"-o", "jsonpath={.status.phase}")
+		output, err := utils.Run(cmd)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(output).To(Equal("Succeeded"), "curl pod in wrong status")
+	}
+	Eventually(verifyCurlUp, 5*time.Minute).Should(Succeed())
 }
 
 // tokenRequest is a simplified representation of the Kubernetes TokenRequest API response,

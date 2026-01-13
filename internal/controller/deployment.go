@@ -131,7 +131,7 @@ func createClusterDeployment(cluster *valkeyiov1alpha1.ValkeyCluster) *appsv1.De
 				TimeoutSeconds:      3,
 				ProbeHandler: corev1.ProbeHandler{
 					HTTPGet: &corev1.HTTPGetAction{
-						Path: "/health",
+						Path: "/ready",
 						Port: intstr.FromInt(DefaultExporterPort),
 					},
 				},
